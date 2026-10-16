@@ -1,0 +1,70 @@
+name: e2e
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 4 * * 1-5' # nightly regression on weekdays
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [api, ui-desktop, ui-mobile]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout Karrio
+        uses: actions/checkout@v4
+        with:
+          repository: karrioapi/karrio
+          path: karrio
+          submodules: false
+
+      - name: Start Karrio stack
+        working-directory: karrio/docker
+        run: |
+          (cd .. && git submodule update --init community)
+          docker compose up -d
+          echo "Waiting for API and dashboard..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:5002/v1/references > /dev/null && curl -sf http://localhost:3002/signin > /dev/null; then
+              echo "Karrio is up"; exit 0
+            fi
+            sleep 10
+          done
+          docker compose ps
+          docker compose logs api --tail 100
+          exit 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Run tests (${{ matrix.project }})
+        run: npx playwright test --project=${{ matrix.project }}
+
+      - name: Karrio API logs on failure
+        if: failure()
+        working-directory: karrio/docker
+        run: docker compose logs api --tail 300 > ../../test-results/karrio-api.log || true
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-${{ matrix.project }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
